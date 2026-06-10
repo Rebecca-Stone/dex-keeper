@@ -388,8 +388,8 @@ function CompareModal({ lists, initialA, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const A = lists.find((l) => l.id === Number(aId));
-  const B = lists.find((l) => l.id === Number(bId));
+  const A = lists.find((l) => String(l.id) === String(aId));
+  const B = lists.find((l) => String(l.id) === String(bId));
   const CAP = 12;
   const mine = (A?.pokemon || []).slice(0, CAP).map((e) => ({ ...DEX[e.id - 1], nick: e.nick }));
   const opps = (B?.pokemon || []).slice(0, CAP).map((e) => ({ ...DEX[e.id - 1], nick: e.nick }));

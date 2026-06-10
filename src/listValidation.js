@@ -14,10 +14,37 @@ function cleanText(value) {
   return typeof value === "string" ? value.trim().slice(0, ENTRY_TEXT_MAX) : "";
 }
 
+function createUuid() {
+  const cryptoApi = globalThis.crypto;
+  if (cryptoApi?.randomUUID) return cryptoApi.randomUUID();
+
+  if (!cryptoApi?.getRandomValues) {
+    throw new Error("Secure random UUID generation is unavailable.");
+  }
+
+  const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0"));
+  return [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join(""),
+  ].join("-");
+}
+
+function isValidListId(id) {
+  if (Number.isSafeInteger(id) && id >= 1) return true;
+  return typeof id === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+}
+
 export function generateListId(existingIds = new Set()) {
   let id;
   do {
-    id = Date.now() + Math.floor(Math.random() * 1_000_000);
+    id = createUuid();
   } while (existingIds.has(id));
   existingIds.add(id);
   return id;
@@ -52,11 +79,11 @@ export function normalizeLists(value, options = {}) {
     }
 
     let id = list.id;
-    if (regenerateListIds || !Number.isSafeInteger(id) || id < 1 || usedListIds.has(id)) {
+    if (regenerateListIds || !isValidListId(id) || usedListIds.has(id)) {
       if (regenerateListIds || !hasOwn(list, "id")) {
         id = generateListId(usedListIds);
       } else {
-        addError(errors, `${listPath}.id`, "Each list needs a unique numeric id.");
+        addError(errors, `${listPath}.id`, "Each list needs a unique id.");
       }
     } else {
       usedListIds.add(id);
