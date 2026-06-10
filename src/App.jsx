@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { RAW, TYPE_ORDER, EFF, GROWTH_RATES, EGG_GROUPS, POKE_COLORS, POKE_SHAPES, PRESET_GROUPS } from "./data.js";
 import * as api from "./api.js";
+import { formatListValidationError, generateListId, normalizeLists, validateLists } from "./listValidation.js";
 
 const DEX = RAW.map((r, i) => ({
   id: i + 1, name: r[0], gen: r[1], habitat: r[2], stats: r[3], evoFrom: r[4],
@@ -48,20 +49,18 @@ const sprite = (id) =>
 const shinySprite = (id) =>
   `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/shiny/${id}.png`;
 
-// Migrate old format (arrays of ids) -> entries {id, nick, note}
 function migrate(lists) {
-  return (lists || []).map((l) => ({
-    ...l,
-    pokemon: (l.pokemon || []).map((e) =>
-      typeof e === "number" ? { id: e, nick: "", note: "" } : e
-    ),
-  }));
+  const result = normalizeLists(lists || []);
+  if (!result.ok) throw new Error(formatListValidationError(result));
+  return result.lists;
 }
 async function loadLists() {
   return migrate(await api.fetchLists());
 }
 async function saveLists(lists) {
-  await api.saveLists(lists);
+  const result = validateLists(lists);
+  if (!result.ok) throw new Error(formatListValidationError(result));
+  await api.saveLists(result.lists);
 }
 
 // ---------- Small components ----------
@@ -565,19 +564,14 @@ function IOModal({ mode, lists, onClose, onImport }) {
     let data;
     try { data = JSON.parse(text); } catch { setMsg("That isn't valid JSON."); return; }
     if (!Array.isArray(data)) data = data && Array.isArray(data.lists) ? data.lists : [data];
-    const clean = [];
-    for (const l of data) {
-      if (!l || typeof l.name !== "string" || !Array.isArray(l.pokemon)) {
-        setMsg("Expected lists with a name and a pokemon array."); return;
-      }
-      const mons = [];
-      for (const e of l.pokemon) {
-        const id = typeof e === "number" ? e : e?.id;
-        if (!Number.isInteger(id) || id < 1 || id > DEX.length) continue;
-        mons.push({ id, nick: (typeof e === "object" && e.nick) || "", note: (typeof e === "object" && e.note) || "" });
-      }
-      clean.push({ id: Date.now() + Math.floor(Math.random() * 1e6), name: l.name.slice(0, 60), team: !!l.team, pokemon: mons });
-    }
+    const imported = normalizeLists(data, {
+      regenerateListIds: true,
+      existingListIds: new Set(lists.map((l) => l.id)),
+      skipInvalidPokemon: true,
+      dedupePokemon: true,
+    });
+    if (!imported.ok) { setMsg(formatListValidationError(imported)); return; }
+    const clean = imported.lists.filter((l) => l.pokemon.length > 0);
     if (clean.length === 0) { setMsg("Nothing importable found."); return; }
     onImport(clean);
   };
@@ -943,6 +937,12 @@ export default function App() {
   };
 
   const persist = async (next, options = {}) => {
+    const validation = validateLists(next);
+    if (!validation.ok) {
+      setToast(formatListValidationError(validation));
+      return;
+    }
+    const safeNext = validation.lists;
     const previousLists = lists;
     const previousActiveListId = activeListId;
     const nextActiveListId = Object.prototype.hasOwnProperty.call(options, "activeListId")
@@ -950,10 +950,10 @@ export default function App() {
       : activeListId;
     const seq = saveSeq.current + 1;
     saveSeq.current = seq;
-    setLists(next);
+    setLists(safeNext);
     setActiveListId(nextActiveListId);
     try {
-      await saveLists(next);
+      await saveLists(safeNext);
     } catch (err) {
       if (seq !== saveSeq.current) return;
       if (err.status === 401) {
@@ -973,7 +973,7 @@ export default function App() {
   const createList = () => {
     const name = newListName.trim();
     if (!name) return;
-    const l = { id: Date.now(), name, pokemon: [] };
+    const l = { id: generateListId(new Set(lists.map((list) => list.id))), name, pokemon: [] };
     persist([...lists, l], { activeListId: l.id });
     setNewListName("");
     setToast(`Created "${name}"`);
@@ -1379,8 +1379,9 @@ export default function App() {
           onClose={() => setPresetsOpen(false)}
           existingNames={new Set(lists.map((l) => l.name))}
           onAdd={(teams) => {
-            const newLists = teams.map((t, i) => ({
-              id: Date.now() + i, name: t.name, team: false,
+            const usedIds = new Set(lists.map((l) => l.id));
+            const newLists = teams.map((t) => ({
+              id: generateListId(usedIds), name: t.name, team: false,
               pokemon: t.pokemon.map((id) => ({ id, nick: "", note: "" })),
             }));
             persist([...lists, ...newLists]);
