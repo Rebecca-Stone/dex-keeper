@@ -1,6 +1,29 @@
 services:
   - type: web
+    name: dex-keeper-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGIN
+        fromService:
+          type: web
+          name: dex-keeper
+          property: host
+
+  - type: web
     name: dex-keeper
     runtime: static
     buildCommand: npm install && npm run build
     staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: dex-keeper-api
+          property: host
