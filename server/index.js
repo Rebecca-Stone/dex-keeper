@@ -3,6 +3,7 @@ import cors from "cors";
 import express from "express";
 import jwt from "jsonwebtoken";
 import { createUser, findUserByUsername, getLists, saveLists } from "./db.js";
+import { formatListValidationError, validateLists } from "../src/listValidation.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -91,10 +92,13 @@ app.get("/api/lists", auth, (req, res) => {
 });
 
 app.put("/api/lists", auth, (req, res) => {
-  if (!Array.isArray(req.body.lists)) {
-    return res.status(400).json({ error: "lists must be an array" });
+  const validated = validateLists(req.body.lists);
+  if (!validated.ok) {
+    return res.status(400).json({ error: formatListValidationError(validated) });
   }
-  saveLists(req.user.id, req.body.lists);
+  if (!saveLists(req.user.id, validated.lists)) {
+    return res.status(404).json({ error: "List storage was not found for this user" });
+  }
   res.json({ ok: true });
 });
 

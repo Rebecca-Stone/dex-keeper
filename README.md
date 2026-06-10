@@ -1,10 +1,10 @@
 # Dex Keeper
 
-A Pokédex-styled team builder and list manager covering all 1,025 Pokémon across nine generations. Built with React + Vite.
+A Pokédex-styled team builder and list manager covering all 1,026 Pokémon across nine generations. Built with React + Vite, with an Express API and SQLite-backed accounts.
 
 ## Features
 
-- **Accounts** — sign up / log in with a trainer name; each trainer's lists are stored separately. Note: authentication is a toy (hashed locally, no server) — don't reuse real passwords.
+- **Accounts** — sign up / log in with a trainer name; passwords are hashed on the API server and each trainer's lists are stored separately in SQLite. This is still a small fan project, so use a made-up password.
 - **Lists** — create unlimited lists, add/remove Pokémon, drag (or ▲▼) to reorder, per-Pokémon nicknames and notes, optional ⚔ 6-slot battle-team mode with legality warnings.
 - **Full National Dex** — search plus filters for generation, type, habitat, rarity (legendary/mythical), color, and body shape.
 - **Detail panel** — base stats, abilities (hidden flagged), height/weight, capture rate, base happiness, growth rate, egg groups, gender ratio, shiny sprite toggle, and the full evolution family with per-step evolution methods.
@@ -20,6 +20,21 @@ A Pokédex-styled team builder and list manager covering all 1,025 Pokémon acro
 npm install
 npm run dev
 ```
+
+In a second terminal, start the API server:
+
+```bash
+npm run dev:server
+```
+
+The Vite app runs on its default local port and proxies `/api` requests to the Express server on `http://localhost:3001`.
+
+Optional server environment variables:
+
+- `PORT` — API port, default `3001`
+- `DATABASE_PATH` — SQLite database path, default `server/data/dex-keeper.db`
+- `JWT_SECRET` — signing secret for login sessions
+- `CORS_ORIGIN` — allowed browser origin for deployed environments
 
 ## Data sources
 

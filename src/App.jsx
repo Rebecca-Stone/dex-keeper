@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { RAW, TYPE_ORDER, EFF, GROWTH_RATES, EGG_GROUPS, POKE_COLORS, POKE_SHAPES, PRESET_GROUPS } from "./data.js";
 import * as api from "./api.js";
+import { formatListValidationError, generateListId, normalizeLists, validateLists } from "./listValidation.js";
 
 const DEX = RAW.map((r, i) => ({
   id: i + 1, name: r[0], gen: r[1], habitat: r[2], stats: r[3], evoFrom: r[4],
@@ -26,6 +27,11 @@ const familyOf = (id) => {
 };
 const STAT_NAMES = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
 const bst = (p) => p.stats.reduce((a, b) => a + b, 0);
+const getPokemon = (id) => (Number.isInteger(id) && id >= 1 && id <= DEX.length ? DEX[id - 1] : null);
+const pokemonFromEntry = (entry) => {
+  const p = getPokemon(entry?.id);
+  return p ? { ...p, nick: entry.nick || "", note: entry.note || "" } : null;
+};
 // Damage multiplier of an attacking type against a defender's type combo
 const defMult = (attackType, defTypes) =>
   defTypes.reduce((m, t) => m * EFF[TYPE_ORDER.indexOf(attackType)][TYPE_ORDER.indexOf(t)], 1);
@@ -48,22 +54,18 @@ const sprite = (id) =>
 const shinySprite = (id) =>
   `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/shiny/${id}.png`;
 
-// Migrate old format (arrays of ids) -> entries {id, nick, note}
 function migrate(lists) {
-  return (lists || []).map((l) => ({
-    ...l,
-    pokemon: (l.pokemon || []).map((e) =>
-      typeof e === "number" ? { id: e, nick: "", note: "" } : e
-    ),
-  }));
+  const result = normalizeLists(lists || []);
+  if (!result.ok) throw new Error(formatListValidationError(result));
+  return result.lists;
 }
 async function loadLists() {
-  try {
-    return migrate(await api.fetchLists());
-  } catch { return []; }
+  return migrate(await api.fetchLists());
 }
 async function saveLists(lists) {
-  await api.saveLists(lists);
+  const result = validateLists(lists);
+  if (!result.ok) throw new Error(formatListValidationError(result));
+  await api.saveLists(result.lists);
 }
 
 // ---------- Small components ----------
@@ -147,10 +149,10 @@ function AuthScreen({ onLogin }) {
     try {
       if (mode === "signup") {
         const { username } = await api.signup(u, password);
-        onLogin(username);
+        await onLogin(username);
       } else {
         const { username } = await api.login(u, password);
-        onLogin(username);
+        await onLogin(username);
       }
     } catch (err) {
       setError(err.message || "Server isn't responding. Try again.");
@@ -200,12 +202,12 @@ function AuthScreen({ onLogin }) {
 
 // ---------- Roster entry (in active list) ----------
 function RosterEntry({ entry, index, total, onMove, onRemove, onEdit, onEvolve, onDragStart, onDragOver, onDrop, isDragTarget }) {
-  const p = DEX[entry.id - 1];
+  const p = getPokemon(entry.id);
   const [editing, setEditing] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [nick, setNick] = useState(entry.nick || "");
   const [note, setNote] = useState(entry.note || "");
-  const evos = CHILDREN[entry.id] || [];
+  const evos = p ? CHILDREN[entry.id] || [] : [];
 
   useEffect(() => { setChoosing(false); }, [entry.id]);
 
@@ -214,6 +216,23 @@ function RosterEntry({ entry, index, total, onMove, onRemove, onEdit, onEvolve, 
     if (evos.length === 1) onEvolve(evos[0]);
     else setChoosing(!choosing);
   };
+
+  if (!p) {
+    return (
+      <div style={{
+        background: "#171927", borderRadius: 10, padding: "8px 10px",
+        border: "1px solid #56141c", color: "#ff8a91",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>Unknown Pokemon #{String(entry.id)}</div>
+            <div style={{ fontSize: 11, color: "#8b8fa3" }}>This saved entry no longer matches the Pokedex.</div>
+          </div>
+          <button onClick={onRemove} aria-label="Remove invalid Pokemon" style={miniBtn(false)}>✕</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -391,11 +410,11 @@ function CompareModal({ lists, initialA, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const A = lists.find((l) => l.id === Number(aId));
-  const B = lists.find((l) => l.id === Number(bId));
+  const A = lists.find((l) => String(l.id) === String(aId));
+  const B = lists.find((l) => String(l.id) === String(bId));
   const CAP = 12;
-  const mine = (A?.pokemon || []).slice(0, CAP).map((e) => ({ ...DEX[e.id - 1], nick: e.nick }));
-  const opps = (B?.pokemon || []).slice(0, CAP).map((e) => ({ ...DEX[e.id - 1], nick: e.nick }));
+  const mine = (A?.pokemon || []).slice(0, CAP).map(pokemonFromEntry).filter(Boolean);
+  const opps = (B?.pokemon || []).slice(0, CAP).map(pokemonFromEntry).filter(Boolean);
 
   const cell = (m, o) => ({ off: bestStab(m, o), def: bestStab(o, m) });
   const cellColor = (c) => {
@@ -440,12 +459,12 @@ function CompareModal({ lists, initialA, onClose }) {
         </div>
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <select value={aId} onChange={(e) => setAId(Number(e.target.value))} style={selStyle}>
-            {lists.map((l) => <option key={l.id} value={l.id}>Your side: {l.name}</option>)}
+          <select value={String(aId)} onChange={(e) => setAId(e.target.value)} style={selStyle}>
+            {lists.map((l) => <option key={l.id} value={String(l.id)}>Your side: {l.name}</option>)}
           </select>
           <span style={{ color: "#8b8fa3", fontSize: 12 }}>vs</span>
-          <select value={bId} onChange={(e) => setBId(Number(e.target.value))} style={selStyle}>
-            {lists.map((l) => <option key={l.id} value={l.id}>Opponent: {l.name}</option>)}
+          <select value={String(bId)} onChange={(e) => setBId(e.target.value)} style={selStyle}>
+            {lists.map((l) => <option key={l.id} value={String(l.id)}>Opponent: {l.name}</option>)}
           </select>
         </div>
 
@@ -567,19 +586,14 @@ function IOModal({ mode, lists, onClose, onImport }) {
     let data;
     try { data = JSON.parse(text); } catch { setMsg("That isn't valid JSON."); return; }
     if (!Array.isArray(data)) data = data && Array.isArray(data.lists) ? data.lists : [data];
-    const clean = [];
-    for (const l of data) {
-      if (!l || typeof l.name !== "string" || !Array.isArray(l.pokemon)) {
-        setMsg("Expected lists with a name and a pokemon array."); return;
-      }
-      const mons = [];
-      for (const e of l.pokemon) {
-        const id = typeof e === "number" ? e : e?.id;
-        if (!Number.isInteger(id) || id < 1 || id > DEX.length) continue;
-        mons.push({ id, nick: (typeof e === "object" && e.nick) || "", note: (typeof e === "object" && e.note) || "" });
-      }
-      clean.push({ id: Date.now() + Math.floor(Math.random() * 1e6), name: l.name.slice(0, 60), team: !!l.team, pokemon: mons });
-    }
+    const imported = normalizeLists(data, {
+      regenerateListIds: true,
+      existingListIds: new Set(lists.map((l) => l.id)),
+      skipInvalidPokemon: true,
+      dedupePokemon: true,
+    });
+    if (!imported.ok) { setMsg(formatListValidationError(imported)); return; }
+    const clean = imported.lists.filter((l) => l.pokemon.length > 0);
     if (clean.length === 0) { setMsg("Nothing importable found."); return; }
     onImport(clean);
   };
@@ -780,7 +794,9 @@ function DetailPanel({ pokemonId, onClose, onSelect, inList, onToggle, activeLis
 
 // ---------- Team analysis ----------
 function TeamAnalysis({ entries }) {
-  const team = entries.map((e) => DEX[e.id - 1]);
+  const team = entries.map(pokemonFromEntry).filter(Boolean);
+  if (team.length === 0) return null;
+
   const avg = STAT_NAMES.map((_, i) =>
     team.reduce((a, p) => a + p.stats[i], 0) / team.length
   );
@@ -882,6 +898,7 @@ export default function App() {
   const [dragIndex, setDragIndex] = useState(null);
   const [dragTarget, setDragTarget] = useState(null);
   const [visibleCount, setVisibleCount] = useState(120);
+  const saveSeq = useRef(0);
 
   useEffect(() => {
     if (!toast) return;
@@ -897,12 +914,21 @@ export default function App() {
     (async () => {
       setLoading(true);
       try {
-        setUser(session.username);
         const ls = await loadLists();
+        setUser(session.username);
         setLists(ls);
         setActiveListId(ls[0]?.id ?? null);
-      } catch {
-        api.clearSession();
+      } catch (err) {
+        if (err.status === 401) {
+          api.clearSession();
+          setToast("Session expired — log in again");
+        } else {
+          api.clearSession();
+          setToast("Could not load saved lists — try logging in again");
+        }
+        setUser(null);
+        setLists([]);
+        setActiveListId(null);
       } finally {
         setLoading(false);
       }
@@ -911,11 +937,20 @@ export default function App() {
 
   const login = async (u) => {
     setLoading(true);
-    setUser(u);
-    const ls = await loadLists();
-    setLists(ls);
-    setActiveListId(ls[0]?.id ?? null);
-    setLoading(false);
+    try {
+      const ls = await loadLists();
+      setUser(u);
+      setLists(ls);
+      setActiveListId(ls[0]?.id ?? null);
+    } catch (err) {
+      api.clearSession();
+      setUser(null);
+      setLists([]);
+      setActiveListId(null);
+      throw new Error(err.status === 401 ? "Session expired — log in again." : "Could not load saved lists. Try again.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const logout = () => {
@@ -925,26 +960,52 @@ export default function App() {
     setActiveListId(null);
   };
 
-  const persist = async (next) => {
-    setLists(next);
-    try { await saveLists(next); }
-    catch { setToast("Save failed — check connection"); }
+  const persist = async (next, options = {}) => {
+    const validation = validateLists(next);
+    if (!validation.ok) {
+      setToast(formatListValidationError(validation));
+      return;
+    }
+    const safeNext = validation.lists;
+    const previousLists = lists;
+    const previousActiveListId = activeListId;
+    const nextActiveListId = Object.prototype.hasOwnProperty.call(options, "activeListId")
+      ? options.activeListId
+      : activeListId;
+    const seq = saveSeq.current + 1;
+    saveSeq.current = seq;
+    setLists(safeNext);
+    setActiveListId(nextActiveListId);
+    try {
+      await saveLists(safeNext);
+    } catch (err) {
+      if (seq !== saveSeq.current) return;
+      if (err.status === 401) {
+        api.clearSession();
+        setUser(null);
+        setLists([]);
+        setActiveListId(null);
+        setToast("Session expired — log in again");
+        return;
+      }
+      setLists(previousLists);
+      setActiveListId(previousActiveListId);
+      setToast("Save failed — changes were rolled back");
+    }
   };
 
   const createList = () => {
     const name = newListName.trim();
     if (!name) return;
-    const l = { id: Date.now(), name, pokemon: [] };
-    persist([...lists, l]);
-    setActiveListId(l.id);
+    const l = { id: generateListId(new Set(lists.map((list) => list.id))), name, pokemon: [] };
+    persist([...lists, l], { activeListId: l.id });
     setNewListName("");
     setToast(`Created "${name}"`);
   };
 
   const deleteList = (id) => {
     const next = lists.filter((l) => l.id !== id);
-    persist(next);
-    if (activeListId === id) setActiveListId(next[0]?.id ?? null);
+    persist(next, { activeListId: activeListId === id ? next[0]?.id ?? null : activeListId });
   };
 
   const activeList = lists.find((l) => l.id === activeListId) || null;
@@ -1342,8 +1403,9 @@ export default function App() {
           onClose={() => setPresetsOpen(false)}
           existingNames={new Set(lists.map((l) => l.name))}
           onAdd={(teams) => {
-            const newLists = teams.map((t, i) => ({
-              id: Date.now() + i, name: t.name, team: false,
+            const usedIds = new Set(lists.map((l) => l.id));
+            const newLists = teams.map((t) => ({
+              id: generateListId(usedIds), name: t.name, team: false,
               pokemon: t.pokemon.map((id) => ({ id, nick: "", note: "" })),
             }));
             persist([...lists, ...newLists]);

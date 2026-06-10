@@ -43,7 +43,8 @@ export function getLists(userId) {
 }
 
 export function saveLists(userId, lists) {
-  db.prepare("UPDATE user_lists SET lists_json = ? WHERE user_id = ?").run(JSON.stringify(lists), userId);
+  const info = db.prepare("UPDATE user_lists SET lists_json = ? WHERE user_id = ?").run(JSON.stringify(lists), userId);
+  return info.changes > 0;
 }
 
 export default db;
