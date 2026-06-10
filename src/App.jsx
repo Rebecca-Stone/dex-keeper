@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { RAW, TYPE_ORDER, EFF, GROWTH_RATES, EGG_GROUPS, POKE_COLORS, POKE_SHAPES, PRESET_GROUPS } from "./data.js";
+import * as api from "./api.js";
 
 const DEX = RAW.map((r, i) => ({
   id: i + 1, name: r[0], gen: r[1], habitat: r[2], stats: r[3], evoFrom: r[4],
@@ -47,23 +48,6 @@ const sprite = (id) =>
 const shinySprite = (id) =>
   `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/shiny/${id}.png`;
 
-// Toy hash — NOT real security; this is a demo app.
-const hash = (s) => {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-  return h.toString(36) + "_" + s.length;
-};
-
-// ---------- Storage helpers ----------
-async function loadAccounts() {
-  try {
-    const r = await window.storage.get("accounts");
-    return r ? JSON.parse(r.value) : {};
-  } catch { return {}; }
-}
-async function saveAccounts(accounts) {
-  await window.storage.set("accounts", JSON.stringify(accounts));
-}
 // Migrate old format (arrays of ids) -> entries {id, nick, note}
 function migrate(lists) {
   return (lists || []).map((l) => ({
@@ -73,14 +57,13 @@ function migrate(lists) {
     ),
   }));
 }
-async function loadLists(user) {
+async function loadLists() {
   try {
-    const r = await window.storage.get(`lists:${user}`);
-    return r ? migrate(JSON.parse(r.value)) : [];
+    return migrate(await api.fetchLists());
   } catch { return []; }
 }
-async function saveLists(user, lists) {
-  await window.storage.set(`lists:${user}`, JSON.stringify(lists));
+async function saveLists(lists) {
+  await api.saveLists(lists);
 }
 
 // ---------- Small components ----------
@@ -162,19 +145,15 @@ function AuthScreen({ onLogin }) {
     if (!u || !password) { setError("Enter a trainer name and a password."); return; }
     setBusy(true);
     try {
-      const accounts = await loadAccounts();
       if (mode === "signup") {
-        if (accounts[u]) { setError("That trainer name is taken. Try logging in."); setBusy(false); return; }
-        accounts[u] = { pass: hash(password), created: Date.now() };
-        await saveAccounts(accounts);
-        onLogin(u);
+        const { username } = await api.signup(u, password);
+        onLogin(username);
       } else {
-        if (!accounts[u]) { setError("No trainer with that name. Sign up first."); setBusy(false); return; }
-        if (accounts[u].pass !== hash(password)) { setError("Wrong password."); setBusy(false); return; }
-        onLogin(u);
+        const { username } = await api.login(u, password);
+        onLogin(username);
       }
-    } catch {
-      setError("Storage isn't responding. Try again.");
+    } catch (err) {
+      setError(err.message || "Server isn't responding. Try again.");
       setBusy(false);
     }
   };
@@ -211,7 +190,7 @@ function AuthScreen({ onLogin }) {
             fontSize: 11, opacity: busy ? 0.6 : 1,
           }}>{busy ? "..." : mode === "signup" ? "CREATE ACCOUNT" : "ENTER"}</button>
           <p style={{ fontSize: 11, color: "#5d6076", margin: 0 }}>
-            Demo app — accounts live in this artifact's storage, so pick a fun made-up password, not a real one.
+            Accounts are stored on the server — pick a fun made-up password, not a real one.
           </p>
         </div>
       </div>
@@ -912,18 +891,43 @@ export default function App() {
 
   useEffect(() => { setVisibleCount(120); }, [search, typeFilter, genFilter, habitatFilter, rarityFilter, colorFilter, shapeFilter]);
 
+  useEffect(() => {
+    const session = api.getStoredSession();
+    if (!session) return;
+    (async () => {
+      setLoading(true);
+      try {
+        setUser(session.username);
+        const ls = await loadLists();
+        setLists(ls);
+        setActiveListId(ls[0]?.id ?? null);
+      } catch {
+        api.clearSession();
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
   const login = async (u) => {
     setLoading(true);
     setUser(u);
-    const ls = await loadLists(u);
+    const ls = await loadLists();
     setLists(ls);
     setActiveListId(ls[0]?.id ?? null);
     setLoading(false);
   };
 
+  const logout = () => {
+    api.clearSession();
+    setUser(null);
+    setLists([]);
+    setActiveListId(null);
+  };
+
   const persist = async (next) => {
     setLists(next);
-    try { await saveLists(user, next); }
+    try { await saveLists(next); }
     catch { setToast("Save failed — check connection"); }
   };
 
@@ -1059,7 +1063,7 @@ export default function App() {
         {user && (
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ fontSize: 13, color: "#ffd9dc" }}>Trainer {user}</span>
-            <button onClick={() => { setUser(null); setLists([]); setActiveListId(null); }} style={{
+            <button onClick={logout} style={{
               background: "#7d0c15", color: "#fff", border: "1px solid #ffb3b8", borderRadius: 6,
               padding: "6px 12px", cursor: "pointer", fontSize: 12,
             }}>Log out</button>
