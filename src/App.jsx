@@ -27,6 +27,11 @@ const familyOf = (id) => {
 };
 const STAT_NAMES = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"];
 const bst = (p) => p.stats.reduce((a, b) => a + b, 0);
+const getPokemon = (id) => (Number.isInteger(id) && id >= 1 && id <= DEX.length ? DEX[id - 1] : null);
+const pokemonFromEntry = (entry) => {
+  const p = getPokemon(entry?.id);
+  return p ? { ...p, nick: entry.nick || "", note: entry.note || "" } : null;
+};
 // Damage multiplier of an attacking type against a defender's type combo
 const defMult = (attackType, defTypes) =>
   defTypes.reduce((m, t) => m * EFF[TYPE_ORDER.indexOf(attackType)][TYPE_ORDER.indexOf(t)], 1);
@@ -197,12 +202,12 @@ function AuthScreen({ onLogin }) {
 
 // ---------- Roster entry (in active list) ----------
 function RosterEntry({ entry, index, total, onMove, onRemove, onEdit, onEvolve, onDragStart, onDragOver, onDrop, isDragTarget }) {
-  const p = DEX[entry.id - 1];
+  const p = getPokemon(entry.id);
   const [editing, setEditing] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [nick, setNick] = useState(entry.nick || "");
   const [note, setNote] = useState(entry.note || "");
-  const evos = CHILDREN[entry.id] || [];
+  const evos = p ? CHILDREN[entry.id] || [] : [];
 
   useEffect(() => { setChoosing(false); }, [entry.id]);
 
@@ -211,6 +216,23 @@ function RosterEntry({ entry, index, total, onMove, onRemove, onEdit, onEvolve, 
     if (evos.length === 1) onEvolve(evos[0]);
     else setChoosing(!choosing);
   };
+
+  if (!p) {
+    return (
+      <div style={{
+        background: "#171927", borderRadius: 10, padding: "8px 10px",
+        border: "1px solid #56141c", color: "#ff8a91",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>Unknown Pokemon #{String(entry.id)}</div>
+            <div style={{ fontSize: 11, color: "#8b8fa3" }}>This saved entry no longer matches the Pokedex.</div>
+          </div>
+          <button onClick={onRemove} aria-label="Remove invalid Pokemon" style={miniBtn(false)}>✕</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -391,8 +413,8 @@ function CompareModal({ lists, initialA, onClose }) {
   const A = lists.find((l) => String(l.id) === String(aId));
   const B = lists.find((l) => String(l.id) === String(bId));
   const CAP = 12;
-  const mine = (A?.pokemon || []).slice(0, CAP).map((e) => ({ ...DEX[e.id - 1], nick: e.nick }));
-  const opps = (B?.pokemon || []).slice(0, CAP).map((e) => ({ ...DEX[e.id - 1], nick: e.nick }));
+  const mine = (A?.pokemon || []).slice(0, CAP).map(pokemonFromEntry).filter(Boolean);
+  const opps = (B?.pokemon || []).slice(0, CAP).map(pokemonFromEntry).filter(Boolean);
 
   const cell = (m, o) => ({ off: bestStab(m, o), def: bestStab(o, m) });
   const cellColor = (c) => {
@@ -437,12 +459,12 @@ function CompareModal({ lists, initialA, onClose }) {
         </div>
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <select value={aId} onChange={(e) => setAId(Number(e.target.value))} style={selStyle}>
-            {lists.map((l) => <option key={l.id} value={l.id}>Your side: {l.name}</option>)}
+          <select value={String(aId)} onChange={(e) => setAId(e.target.value)} style={selStyle}>
+            {lists.map((l) => <option key={l.id} value={String(l.id)}>Your side: {l.name}</option>)}
           </select>
           <span style={{ color: "#8b8fa3", fontSize: 12 }}>vs</span>
-          <select value={bId} onChange={(e) => setBId(Number(e.target.value))} style={selStyle}>
-            {lists.map((l) => <option key={l.id} value={l.id}>Opponent: {l.name}</option>)}
+          <select value={String(bId)} onChange={(e) => setBId(e.target.value)} style={selStyle}>
+            {lists.map((l) => <option key={l.id} value={String(l.id)}>Opponent: {l.name}</option>)}
           </select>
         </div>
 
@@ -772,7 +794,9 @@ function DetailPanel({ pokemonId, onClose, onSelect, inList, onToggle, activeLis
 
 // ---------- Team analysis ----------
 function TeamAnalysis({ entries }) {
-  const team = entries.map((e) => DEX[e.id - 1]);
+  const team = entries.map(pokemonFromEntry).filter(Boolean);
+  if (team.length === 0) return null;
+
   const avg = STAT_NAMES.map((_, i) =>
     team.reduce((a, p) => a + p.stats[i], 0) / team.length
   );
