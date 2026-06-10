@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: dex-keeper
+    runtime: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
