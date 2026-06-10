@@ -94,7 +94,9 @@ app.put("/api/lists", auth, (req, res) => {
   if (!Array.isArray(req.body.lists)) {
     return res.status(400).json({ error: "lists must be an array" });
   }
-  saveLists(req.user.id, req.body.lists);
+  if (!saveLists(req.user.id, req.body.lists)) {
+    return res.status(404).json({ error: "List storage was not found for this user" });
+  }
   res.json({ ok: true });
 });
 

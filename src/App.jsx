@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { RAW, TYPE_ORDER, EFF, GROWTH_RATES, EGG_GROUPS, POKE_COLORS, POKE_SHAPES, PRESET_GROUPS } from "./data.js";
 import * as api from "./api.js";
 
@@ -58,9 +58,7 @@ function migrate(lists) {
   }));
 }
 async function loadLists() {
-  try {
-    return migrate(await api.fetchLists());
-  } catch { return []; }
+  return migrate(await api.fetchLists());
 }
 async function saveLists(lists) {
   await api.saveLists(lists);
@@ -147,10 +145,10 @@ function AuthScreen({ onLogin }) {
     try {
       if (mode === "signup") {
         const { username } = await api.signup(u, password);
-        onLogin(username);
+        await onLogin(username);
       } else {
         const { username } = await api.login(u, password);
-        onLogin(username);
+        await onLogin(username);
       }
     } catch (err) {
       setError(err.message || "Server isn't responding. Try again.");
@@ -882,6 +880,7 @@ export default function App() {
   const [dragIndex, setDragIndex] = useState(null);
   const [dragTarget, setDragTarget] = useState(null);
   const [visibleCount, setVisibleCount] = useState(120);
+  const saveSeq = useRef(0);
 
   useEffect(() => {
     if (!toast) return;
@@ -897,12 +896,21 @@ export default function App() {
     (async () => {
       setLoading(true);
       try {
-        setUser(session.username);
         const ls = await loadLists();
+        setUser(session.username);
         setLists(ls);
         setActiveListId(ls[0]?.id ?? null);
-      } catch {
-        api.clearSession();
+      } catch (err) {
+        if (err.status === 401) {
+          api.clearSession();
+          setToast("Session expired — log in again");
+        } else {
+          api.clearSession();
+          setToast("Could not load saved lists — try logging in again");
+        }
+        setUser(null);
+        setLists([]);
+        setActiveListId(null);
       } finally {
         setLoading(false);
       }
@@ -911,11 +919,20 @@ export default function App() {
 
   const login = async (u) => {
     setLoading(true);
-    setUser(u);
-    const ls = await loadLists();
-    setLists(ls);
-    setActiveListId(ls[0]?.id ?? null);
-    setLoading(false);
+    try {
+      const ls = await loadLists();
+      setUser(u);
+      setLists(ls);
+      setActiveListId(ls[0]?.id ?? null);
+    } catch (err) {
+      api.clearSession();
+      setUser(null);
+      setLists([]);
+      setActiveListId(null);
+      throw new Error(err.status === 401 ? "Session expired — log in again." : "Could not load saved lists. Try again.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const logout = () => {
@@ -925,26 +942,46 @@ export default function App() {
     setActiveListId(null);
   };
 
-  const persist = async (next) => {
+  const persist = async (next, options = {}) => {
+    const previousLists = lists;
+    const previousActiveListId = activeListId;
+    const nextActiveListId = Object.prototype.hasOwnProperty.call(options, "activeListId")
+      ? options.activeListId
+      : activeListId;
+    const seq = saveSeq.current + 1;
+    saveSeq.current = seq;
     setLists(next);
-    try { await saveLists(next); }
-    catch { setToast("Save failed — check connection"); }
+    setActiveListId(nextActiveListId);
+    try {
+      await saveLists(next);
+    } catch (err) {
+      if (seq !== saveSeq.current) return;
+      if (err.status === 401) {
+        api.clearSession();
+        setUser(null);
+        setLists([]);
+        setActiveListId(null);
+        setToast("Session expired — log in again");
+        return;
+      }
+      setLists(previousLists);
+      setActiveListId(previousActiveListId);
+      setToast("Save failed — changes were rolled back");
+    }
   };
 
   const createList = () => {
     const name = newListName.trim();
     if (!name) return;
     const l = { id: Date.now(), name, pokemon: [] };
-    persist([...lists, l]);
-    setActiveListId(l.id);
+    persist([...lists, l], { activeListId: l.id });
     setNewListName("");
     setToast(`Created "${name}"`);
   };
 
   const deleteList = (id) => {
     const next = lists.filter((l) => l.id !== id);
-    persist(next);
-    if (activeListId === id) setActiveListId(next[0]?.id ?? null);
+    persist(next, { activeListId: activeListId === id ? next[0]?.id ?? null : activeListId });
   };
 
   const activeList = lists.find((l) => l.id === activeListId) || null;
