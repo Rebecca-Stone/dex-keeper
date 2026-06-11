@@ -134,7 +134,7 @@ const miniActionBtn = {
 };
 
 // ---------- Auth screen ----------
-function AuthScreen({ onLogin }) {
+function AuthScreen({ onLogin, notice }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -175,6 +175,12 @@ function AuthScreen({ onLogin }) {
       <div style={{ background: "#171927", border: "1px solid #2a2d40", borderRadius: 12, overflow: "hidden" }}>
         <div style={{ display: "flex" }}>{tab("login", "LOG IN")}{tab("signup", "SIGN UP")}</div>
         <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 14 }}>
+          {notice && (
+            <div style={{
+              fontSize: 12, color: "#ffd98a", background: "#2e2410",
+              border: "1px solid #8a6d1a", borderRadius: 8, padding: "8px 10px",
+            }}>{notice}</div>
+          )}
           <label style={{ fontSize: 12, color: "#8b8fa3" }}>Trainer name
             <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off"
               onKeyDown={(e) => e.key === "Enter" && submit()}
@@ -898,7 +904,20 @@ export default function App() {
   const [dragIndex, setDragIndex] = useState(null);
   const [dragTarget, setDragTarget] = useState(null);
   const [visibleCount, setVisibleCount] = useState(120);
-  const saveSeq = useRef(0);
+  const [unsaved, setUnsaved] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
+  // listsRef always mirrors the latest applied lists so mutations never
+  // compute from stale render-closure state.
+  const listsRef = useRef([]);
+  const saving = useRef({ inFlight: false, queued: false, epoch: 0 });
+  // Snapshot kept when a save hits 401, so logging back in can restore
+  // and save the changes instead of losing them.
+  const pendingRecovery = useRef(null);
+
+  const applyLists = (next) => {
+    listsRef.current = next;
+    setLists(next);
+  };
 
   useEffect(() => {
     if (!toast) return;
@@ -909,6 +928,13 @@ export default function App() {
   useEffect(() => { setVisibleCount(120); }, [search, typeFilter, genFilter, habitatFilter, rarityFilter, colorFilter, shapeFilter]);
 
   useEffect(() => {
+    if (!unsaved && !saveFailed) return;
+    const warn = (e) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [unsaved, saveFailed]);
+
+  useEffect(() => {
     const session = api.getStoredSession();
     if (!session) return;
     (async () => {
@@ -916,7 +942,7 @@ export default function App() {
       try {
         const ls = await loadLists();
         setUser(session.username);
-        setLists(ls);
+        applyLists(ls);
         setActiveListId(ls[0]?.id ?? null);
       } catch (err) {
         if (err.status === 401) {
@@ -927,7 +953,7 @@ export default function App() {
           setToast("Could not load saved lists — try logging in again");
         }
         setUser(null);
-        setLists([]);
+        applyLists([]);
         setActiveListId(null);
       } finally {
         setLoading(false);
@@ -938,14 +964,26 @@ export default function App() {
   const login = async (u) => {
     setLoading(true);
     try {
+      if (pendingRecovery.current?.username === u) {
+        const recovery = pendingRecovery.current;
+        pendingRecovery.current = null;
+        setUser(u);
+        applyLists(recovery.lists);
+        setActiveListId(recovery.activeListId);
+        setUnsaved(true);
+        setToast("Welcome back — saving your earlier changes");
+        runSave();
+        return;
+      }
+      pendingRecovery.current = null;
       const ls = await loadLists();
       setUser(u);
-      setLists(ls);
+      applyLists(ls);
       setActiveListId(ls[0]?.id ?? null);
     } catch (err) {
       api.clearSession();
       setUser(null);
-      setLists([]);
+      applyLists([]);
       setActiveListId(null);
       throw new Error(err.status === 401 ? "Session expired — log in again." : "Could not load saved lists. Try again.");
     } finally {
@@ -954,110 +992,175 @@ export default function App() {
   };
 
   const logout = () => {
+    if ((unsaved || saveFailed) && !window.confirm("Some changes haven't reached the server yet and will be lost. Log out anyway?")) {
+      return;
+    }
+    saving.current.epoch += 1;
+    saving.current.queued = false;
+    pendingRecovery.current = null;
     api.clearSession();
     setUser(null);
-    setLists([]);
+    applyLists([]);
     setActiveListId(null);
+    setUnsaved(false);
+    setSaveFailed(false);
   };
 
-  const persist = async (next, options = {}) => {
+  // One save in flight at a time; whatever lists state exists when a save
+  // finishes is what gets saved next, so saves can't land out of order.
+  const runSave = async () => {
+    if (saving.current.inFlight) {
+      saving.current.queued = true;
+      return;
+    }
+    saving.current.inFlight = true;
+    const epoch = saving.current.epoch;
+    try {
+      do {
+        saving.current.queued = false;
+        try {
+          await saveLists(listsRef.current);
+          if (epoch !== saving.current.epoch) return;
+          if (!saving.current.queued) {
+            setUnsaved(false);
+            setSaveFailed(false);
+          }
+        } catch (err) {
+          if (epoch !== saving.current.epoch) return;
+          if (saving.current.queued) continue;
+          if (err.status === 401) {
+            pendingRecovery.current = { username: user, lists: listsRef.current, activeListId };
+            api.clearSession();
+            setUser(null);
+            setToast("Session expired — log back in to save your changes");
+          } else {
+            setSaveFailed(true);
+          }
+          return;
+        }
+      } while (saving.current.queued);
+    } finally {
+      saving.current.inFlight = false;
+    }
+  };
+
+  const persist = (updater, options = {}) => {
+    const current = listsRef.current;
+    const next = typeof updater === "function" ? updater(current) : updater;
+    if (next === current) return;
     const validation = validateLists(next);
     if (!validation.ok) {
       setToast(formatListValidationError(validation));
       return;
     }
     const safeNext = validation.lists;
-    const previousLists = lists;
-    const previousActiveListId = activeListId;
-    const nextActiveListId = Object.prototype.hasOwnProperty.call(options, "activeListId")
-      ? options.activeListId
-      : activeListId;
-    const seq = saveSeq.current + 1;
-    saveSeq.current = seq;
-    setLists(safeNext);
-    setActiveListId(nextActiveListId);
-    try {
-      await saveLists(safeNext);
-    } catch (err) {
-      if (seq !== saveSeq.current) return;
-      if (err.status === 401) {
-        api.clearSession();
-        setUser(null);
-        setLists([]);
-        setActiveListId(null);
-        setToast("Session expired — log in again");
-        return;
-      }
-      setLists(previousLists);
-      setActiveListId(previousActiveListId);
-      setToast("Save failed — changes were rolled back");
+    applyLists(safeNext);
+    if (Object.prototype.hasOwnProperty.call(options, "activeListId")) {
+      const target = options.activeListId;
+      setActiveListId(typeof target === "function" ? target(safeNext) : target);
     }
+    setUnsaved(true);
+    runSave();
   };
 
   const createList = () => {
     const name = newListName.trim();
     if (!name) return;
-    const l = { id: generateListId(new Set(lists.map((list) => list.id))), name, pokemon: [] };
-    persist([...lists, l], { activeListId: l.id });
+    persist(
+      (ls) => [...ls, { id: generateListId(new Set(ls.map((list) => list.id))), name, pokemon: [] }],
+      { activeListId: (next) => next[next.length - 1].id },
+    );
     setNewListName("");
     setToast(`Created "${name}"`);
   };
 
   const deleteList = (id) => {
-    const next = lists.filter((l) => l.id !== id);
-    persist(next, { activeListId: activeListId === id ? next[0]?.id ?? null : activeListId });
+    persist((ls) => ls.filter((l) => l.id !== id), {
+      activeListId: (next) => (activeListId === id ? next[0]?.id ?? null : activeListId),
+    });
   };
 
   const activeList = lists.find((l) => l.id === activeListId) || null;
 
   const updateActive = (fn) => {
-    persist(lists.map((l) => (l.id === activeListId ? fn(l) : l)));
+    persist((ls) => {
+      let changed = false;
+      const next = ls.map((l) => {
+        if (l.id !== activeListId) return l;
+        const updated = fn(l);
+        if (updated !== l) changed = true;
+        return updated;
+      });
+      return changed ? next : ls;
+    });
   };
 
+  // Checks live inside the updaters so rapid actions are judged against the
+  // state they actually apply to, not a stale render.
   const toggleInList = (pid) => {
     if (!activeList) { setToast("Create a list first"); return; }
-    const has = activeList.pokemon.some((e) => e.id === pid);
-    if (!has && activeList.team && activeList.pokemon.length >= 6) {
-      setToast("Team is full (6/6) — remove someone first"); return;
-    }
-    updateActive((l) => ({
-      ...l,
-      pokemon: has ? l.pokemon.filter((e) => e.id !== pid) : [...l.pokemon, { id: pid, nick: "", note: "" }],
-    }));
     const p = DEX[pid - 1];
-    setToast(has ? `${p.name} removed` : `${p.name} → ${activeList.name}`);
+    let outcome = null;
+    updateActive((l) => {
+      const has = l.pokemon.some((e) => e.id === pid);
+      if (!has && l.team && l.pokemon.length >= 6) {
+        outcome = "Team is full (6/6) — remove someone first";
+        return l;
+      }
+      outcome = has ? `${p.name} removed` : `${p.name} → ${l.name}`;
+      return {
+        ...l,
+        pokemon: has ? l.pokemon.filter((e) => e.id !== pid) : [...l.pokemon, { id: pid, nick: "", note: "" }],
+      };
+    });
+    if (outcome) setToast(outcome);
   };
 
   const addFamily = (pid) => {
     if (!activeList) { setToast("Create a list first"); return; }
     const fam = familyOf(pid);
-    const have = new Set(activeList.pokemon.map((e) => e.id));
-    let add = fam.filter((id) => !have.has(id));
-    if (add.length === 0) { setToast("Whole line is already in the list"); return; }
-    if (activeList.team) {
-      const space = 6 - activeList.pokemon.length;
-      if (space <= 0) { setToast("Team is full (6/6)"); return; }
-      if (add.length > space) { add = add.slice(0, space); }
-    }
-    updateActive((l) => ({
-      ...l,
-      pokemon: [...l.pokemon, ...add.map((id) => ({ id, nick: "", note: "" }))],
-    }));
     const root = DEX[fam[0] - 1];
-    setToast(`Added ${root.name} line (+${add.length})`);
+    let outcome = null;
+    updateActive((l) => {
+      const have = new Set(l.pokemon.map((e) => e.id));
+      let add = fam.filter((id) => !have.has(id));
+      if (add.length === 0) {
+        outcome = "Whole line is already in the list";
+        return l;
+      }
+      if (l.team) {
+        const space = 6 - l.pokemon.length;
+        if (space <= 0) {
+          outcome = "Team is full (6/6)";
+          return l;
+        }
+        if (add.length > space) add = add.slice(0, space);
+      }
+      outcome = `Added ${root.name} line (+${add.length})`;
+      return {
+        ...l,
+        pokemon: [...l.pokemon, ...add.map((id) => ({ id, nick: "", note: "" }))],
+      };
+    });
+    if (outcome) setToast(outcome);
   };
 
   const evolveEntry = (fromId, toId) => {
-    if (activeList.pokemon.some((e) => e.id === toId)) {
-      setToast(`${DEX[toId - 1].name} is already in this list`); return;
-    }
-    const old = activeList.pokemon.find((e) => e.id === fromId);
-    updateActive((l) => ({
-      ...l,
-      pokemon: l.pokemon.map((e) => (e.id === fromId ? { ...e, id: toId } : e)),
-    }));
-    const who = old?.nick || DEX[fromId - 1].name;
-    setToast(`${who} evolved into ${DEX[toId - 1].name}!`);
+    let outcome = null;
+    updateActive((l) => {
+      if (l.pokemon.some((e) => e.id === toId)) {
+        outcome = `${DEX[toId - 1].name} is already in this list`;
+        return l;
+      }
+      const old = l.pokemon.find((e) => e.id === fromId);
+      if (!old) return l;
+      outcome = `${old.nick || DEX[fromId - 1].name} evolved into ${DEX[toId - 1].name}!`;
+      return {
+        ...l,
+        pokemon: l.pokemon.map((e) => (e.id === fromId ? { ...e, id: toId } : e)),
+      };
+    });
+    if (outcome) setToast(outcome);
   };
 
   const moveEntry = (index, dir) => {
@@ -1123,6 +1226,9 @@ export default function App() {
         </h1>
         {user && (
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {saveFailed
+              ? <span style={{ fontSize: 12, color: "#ffd23e" }}>⚠ Not saved</span>
+              : unsaved && <span style={{ fontSize: 12, color: "#ffd9dc", opacity: 0.8 }}>Saving…</span>}
             <span style={{ fontSize: 13, color: "#ffd9dc" }}>Trainer {user}</span>
             <button onClick={logout} style={{
               background: "#7d0c15", color: "#fff", border: "1px solid #ffb3b8", borderRadius: 6,
@@ -1132,8 +1238,22 @@ export default function App() {
         )}
       </header>
 
+      {user && saveFailed && (
+        <div style={{
+          background: "#2e2410", borderBottom: "1px solid #8a6d1a", color: "#ffd98a",
+          padding: "8px 20px", fontSize: 13, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+        }}>
+          <span>Couldn't save your latest changes to the server — they're still here locally.</span>
+          <button onClick={() => { setSaveFailed(false); runSave(); }} style={{
+            ...miniActionBtn, color: "#ffd98a", border: "1px solid #8a6d1a",
+          }}>RETRY</button>
+        </div>
+      )}
+
       {!user ? (
-        <AuthScreen onLogin={login} />
+        <AuthScreen onLogin={login} notice={pendingRecovery.current
+          ? `You have unsaved changes for Trainer ${pendingRecovery.current.username}. Log back in with that name to restore and save them.`
+          : ""} />
       ) : loading ? (
         <p style={{ textAlign: "center", marginTop: 60, fontFamily: "'Press Start 2P', monospace", fontSize: 10, color: "#8b8fa3" }}>LOADING...</p>
       ) : (
@@ -1403,12 +1523,14 @@ export default function App() {
           onClose={() => setPresetsOpen(false)}
           existingNames={new Set(lists.map((l) => l.name))}
           onAdd={(teams) => {
-            const usedIds = new Set(lists.map((l) => l.id));
-            const newLists = teams.map((t) => ({
-              id: generateListId(usedIds), name: t.name, team: false,
-              pokemon: t.pokemon.map((id) => ({ id, nick: "", note: "" })),
-            }));
-            persist([...lists, ...newLists]);
+            persist((ls) => {
+              const usedIds = new Set(ls.map((l) => l.id));
+              const newLists = teams.map((t) => ({
+                id: generateListId(usedIds), name: t.name, team: false,
+                pokemon: t.pokemon.map((id) => ({ id, nick: "", note: "" })),
+              }));
+              return [...ls, ...newLists];
+            });
             setToast(`Added ${teams.length === 1 ? teams[0].name : teams.length + " boss teams"}`);
           }}
         />
@@ -1421,7 +1543,7 @@ export default function App() {
       {ioMode && (
         <IOModal mode={ioMode} lists={lists} onClose={() => setIoMode(null)}
           onImport={(incoming) => {
-            persist([...lists, ...incoming]);
+            persist((ls) => [...ls, ...incoming]);
             setIoMode(null);
             setToast(`Imported ${incoming.length} list${incoming.length > 1 ? "s" : ""}`);
           }} />

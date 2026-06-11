@@ -66,7 +66,17 @@ app.post("/api/auth/signup", async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(req.body.password, 10);
-  const user = createUser(validated.username, passwordHash);
+  let user;
+  try {
+    user = createUser(validated.username, passwordHash);
+  } catch (err) {
+    // Two simultaneous signups can both pass the findUserByUsername check
+    // and race on the UNIQUE constraint — surface the same friendly conflict.
+    if (typeof err?.code === "string" && err.code.startsWith("SQLITE_CONSTRAINT")) {
+      return res.status(409).json({ error: "That trainer name is taken. Try logging in." });
+    }
+    throw err;
+  }
   const token = signToken(user);
   res.status(201).json({ token, username: user.username });
 });

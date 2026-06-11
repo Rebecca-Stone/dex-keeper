@@ -17,9 +17,16 @@ async function request(path, options = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
-  const data = await res.json().catch(() => ({}));
+  const data = await res.json().catch(() => null);
   if (!res.ok) {
-    const err = new Error(data.error || "Request failed");
+    const err = new Error(data?.error || "Request failed");
+    err.status = res.status;
+    throw err;
+  }
+  if (!data || typeof data !== "object") {
+    // A 2xx response that isn't JSON means we aren't talking to the real API
+    // (e.g. a misconfigured deployment serving the app's HTML for /api routes).
+    const err = new Error("Unexpected response from the server.");
     err.status = res.status;
     throw err;
   }
@@ -42,11 +49,16 @@ export function clearSession() {
   sessionStorage.removeItem(USER_KEY);
 }
 
+function validSession(data) {
+  return typeof data.token === "string" && data.token && typeof data.username === "string" && data.username;
+}
+
 export async function signup(username, password) {
   const data = await request("/api/auth/signup", {
     method: "POST",
     body: JSON.stringify({ username, password }),
   });
+  if (!validSession(data)) throw new Error("Unexpected response from the server.");
   storeSession(data);
   return data;
 }
@@ -56,12 +68,14 @@ export async function login(username, password) {
     method: "POST",
     body: JSON.stringify({ username, password }),
   });
+  if (!validSession(data)) throw new Error("Unexpected response from the server.");
   storeSession(data);
   return data;
 }
 
 export async function fetchLists() {
   const data = await request("/api/lists");
+  if (!Array.isArray(data.lists)) throw new Error("Unexpected response from the server.");
   return data.lists;
 }
 

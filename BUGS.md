@@ -8,35 +8,14 @@ None currently known. `npm run build` passes.
 
 ## P1
 
-### Rapid list edits can overwrite each other
+### Production data is wiped on every deploy or restart
 
-- **Symptom:** Fast actions such as adding multiple Pokemon, reordering, toggling team mode, or editing notes can be calculated from stale `lists` / `activeList` state.
-- **Why it matters:** A later optimistic save can drop an earlier change before the server ever sees it.
-- **Where to start:** `src/App.jsx`, especially `persist`, `updateActive`, `toggleInList`, `addFamily`, `moveEntry`, and `reorder`.
-- **Fix idea:** Move list mutations to functional state updates or a reducer, then persist the exact state produced by that update.
-
-### Failed save rollback can discard newer local changes
-
-- **Symptom:** `persist` captures `previousLists` and rolls back when the latest save fails. If several saves are in flight, rollback behavior may not match the user's most recent visible state.
-- **Why it matters:** Network hiccups can make list changes appear to vanish.
-- **Where to start:** `src/App.jsx` `persist` and `saveSeq`.
-- **Fix idea:** Track pending mutations explicitly, or reload from the server after a failed latest save and show a recovery prompt.
-
-### Session expiration loses unsaved optimistic changes
-
-- **Symptom:** When a save returns `401`, the app clears the session and all lists immediately.
-- **Why it matters:** Users may lose recent edits without a chance to export or retry after logging back in.
-- **Where to start:** `src/App.jsx` `persist`, `api.js` request handling.
-- **Fix idea:** Keep the last local list snapshot in memory, prompt for login, then retry save or offer export.
+- **Symptom:** Accounts and lists live in a SQLite file on the API service's local disk. Render's free plan has no persistent disk, so every deploy or restart starts from an empty database.
+- **Why it matters:** All trainers and their lists vanish whenever a commit lands on `main` (auto-deploy) or the service restarts.
+- **Where to start:** `server/db.js`, Render service `dex-keeper-api`.
+- **Fix idea:** Paid Render plan with a persistent disk mounted at `DATABASE_PATH`, or move to a hosted database (Postgres, Turso, etc.).
 
 ## P2
-
-### Duplicate trainer-name races can throw server errors
-
-- **Symptom:** Signup checks `findUserByUsername` before inserting. Two simultaneous signups with the same name can race and hit the SQLite unique constraint.
-- **Why it matters:** One user gets a generic server failure instead of the expected "name is taken" response.
-- **Where to start:** `server/index.js` signup route and `server/db.js` `createUser`.
-- **Fix idea:** Catch unique-constraint errors from `createUser` and return `409`.
 
 ### Import silently drops invalid Pokemon
 
@@ -68,9 +47,12 @@ None currently known. `npm run build` passes.
 - **Where to start:** `src/App.jsx` `Sprite`.
 - **Fix idea:** Keep a shared failed-sprite set keyed by Pokemon id.
 
-### API base URL normalizes all non-http values to https
+## Fixed
 
-- **Symptom:** `VITE_API_URL=localhost:3001` becomes `https://localhost:3001`.
-- **Why it matters:** Local deployments that configure the env var without a scheme fail unexpectedly.
-- **Where to start:** `src/api.js` `API_BASE`.
-- **Fix idea:** Treat localhost / 127.0.0.1 as `http://` when no scheme is supplied, or require and validate an explicit scheme.
+- **Rapid list edits can overwrite each other** — fixed: `persist` now takes an updater function applied to a `listsRef` that always mirrors the latest state, and capacity/duplicate checks run inside the updaters (`src/App.jsx`).
+- **Failed save rollback can discard newer local changes** — fixed: saves are serialized and coalesced (one in flight, latest state wins); on failure the local state is kept and a banner offers RETRY instead of rolling back.
+- **Session expiration loses unsaved optimistic changes** — fixed: a `401` during save keeps the lists in memory; logging back in as the same trainer restores and saves them.
+- **Duplicate trainer-name races can throw server errors** — fixed: `server/index.js` signup catches `SQLITE_CONSTRAINT*` from `createUser` and returns the friendly `409`.
+- **Silent fake-success on non-JSON 2xx responses** — fixed: `src/api.js` now rejects 2xx responses that aren't JSON objects and validates auth payloads before storing a session (this is what made broken production login look successful).
+- **API base URL normalizes all non-http values to https** — fixed: scheme-less `localhost` / `127.0.0.1` / `[::1]` values get `http://` (`src/api.js` `withScheme`).
+- **Production login broken (no API service)** — fixed: created the `dex-keeper-api` Render service, set `VITE_API_URL` on the static site, and made the static build fail loudly when `VITE_API_URL` is empty (`render.yaml` + dashboard build command).
