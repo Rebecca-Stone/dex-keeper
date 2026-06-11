@@ -7,6 +7,7 @@ import { formatListValidationError, validateLists } from "../src/listValidation.
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST;
 const JWT_SECRET = process.env.JWT_SECRET || "dex-keeper-dev-secret-change-in-production";
 
 function corsOrigin() {
@@ -102,6 +103,6 @@ app.put("/api/lists", auth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.listen(PORT, () => {
-  console.log(`Dex Keeper API listening on port ${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`Dex Keeper API listening on ${HOST || "0.0.0.0"}:${PORT}`);
 });

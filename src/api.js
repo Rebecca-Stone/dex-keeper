@@ -1,6 +1,12 @@
 const rawBase = import.meta.env.VITE_API_URL || "";
+const withScheme = (base) => {
+  if (base.startsWith("http")) return base;
+  return /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(base)
+    ? `http://${base}`
+    : `https://${base}`;
+};
 const API_BASE = rawBase
-  ? (rawBase.startsWith("http") ? rawBase : `https://${rawBase}`)
+  ? withScheme(rawBase)
   : "";
 const TOKEN_KEY = "dexkeeper:token";
 const USER_KEY = "dexkeeper:user";

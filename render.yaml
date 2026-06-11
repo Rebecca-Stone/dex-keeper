@@ -5,6 +5,7 @@ services:
     plan: free
     buildCommand: npm install
     startCommand: npm start
+    healthCheckPath: /api/health
     envVars:
       - key: JWT_SECRET
         generateValue: true
@@ -19,7 +20,7 @@ services:
   - type: web
     name: dex-keeper
     runtime: static
-    buildCommand: npm install && npm run build
+    buildCommand: npm install && (test -n "$VITE_API_URL" || (echo "VITE_API_URL is empty — is the dex-keeper-api service deployed?" && false)) && npm run build
     staticPublishPath: ./dist
     envVars:
       - key: VITE_API_URL
